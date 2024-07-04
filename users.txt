@@ -1,0 +1,11 @@
+alicee;admin,developer
+bobb;developer
+charliee;admin
+jime;design,dev,admin
+robb;admin
+markk_john;design,dev;design
+Janny_doe;dev,admin
+tiny;fashion,fish
+jimm_crew;state,farms
+tims_dale;farms
+luke;pond,well
