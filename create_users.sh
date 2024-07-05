@@ -1,158 +1,116 @@
 #!/bin/bash
 
-# Define the input file and log file
-input_file="users.txt"
-log_file="/var/log/user_management.log"
-password_file="/var/secure/user_passwords.txt"
-
-# Check if the input file exists
-if [[ ! -f "$input_file" ]]; then
-    echo "Error: $input_file not found."
-    exit 1
-fi
-
-# Create log file if it doesn't exist and set permissions
-sudo touch "$log_file"
-sudo chmod 600 "$log_file"
-
-# Create password file if it doesn't exist and set permissions
-if [[ ! -f "$password_file" ]]; then
-    sudo touch "$password_file"
-    sudo chmod 600 "$password_file"
-fi
-
-# Function to generate a random password
-generate_password() {
-    local length="${1:-16}"  # Default length is 16 characters
-    openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c"$length"
-}
+# Log file location
+LOGFILE="/var/log/user_management.log"
+PASSWORD_FILE="/var/secure/user_passwords.txt"
+USER_LIST_FILE="users.txt"
 
 # Function to log messages
 log_message() {
-    local message="$1"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $message" | sudo tee -a "$log_file" > /dev/null
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOGFILE"
 }
 
-# Arrays to store usernames and groups
-declare -A user_groups
-declare -A unique_groups
-usernames=()
+# Check if the script is run with root privileges
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root" 
+   exit 1
+fi
 
-# Read the input file line by line
-while IFS= read -r line || [[ -n "$line" ]]; do
-    # Remove leading and trailing whitespace
-    line=$(echo "$line" | xargs)
-    
-    # Split the line at the semicolon and check for valid format
-    if [[ "$line" == *";"* ]]; then
-        username=$(echo "$line" | cut -d ';' -f 1 | xargs)
-        group_list=$(echo "$line" | cut -d ';' -f 2 | xargs)
+echo "Script started."
 
-        # Debugging output to verify parsing
-        echo "Processing user: '$username'"
-        echo "Groups: '$group_list'"
+# Check if the user list file exists
+if [ ! -f "$USER_LIST_FILE" ]; then
+    echo "User list file not found: $USER_LIST_FILE"
+    exit 1
+fi
 
-        # Store username
-        usernames+=("$username")
+echo "Processing user list file: $USER_LIST_FILE"
 
-        # Store groups for each user
-        user_groups["$username"]="$group_list"
+# Create the secure directory if it does not exist
+mkdir -p /var/secure
+chmod 700 /var/secure
 
-        # Split groups by comma and store them in unique_groups
-        IFS=',' read -ra group_array <<< "$group_list"
-        for group in "${group_array[@]}"; do
-            group=$(echo "$group" | xargs)
-            echo "Processing group: '$group' for user: '$username'"  # Debugging output
-            unique_groups["$group"]=1
-        done
+echo "Secure directory created."
 
-        # Ensure the personal group is created
-        if ! sudo getent group "$username" &>/dev/null; then
-            if sudo groupadd "$username"; then
-                log_message "Personal group '$username' created successfully."
-            else
-                log_message "Failed to create personal group '$username'."
-            fi
-        fi
+# Empty the password file if it exists
+> "$PASSWORD_FILE"
 
-        # Create user and add to groups
-        if sudo getent passwd "$username" &>/dev/null; then
-            log_message "User '$username' already exists."
-        else
-            # Generate random password
-            password=$(generate_password 12)
+echo "Password file emptied."
 
-            # Store password in file
-            echo "$username:$password" | sudo tee -a "$password_file" > /dev/null
+# Ensure the log file has the right permissions
+touch "$LOGFILE"
+chmod 600 "$LOGFILE"
 
-            if sudo useradd -m -g "$username" -p "$(openssl passwd -1 "$password")" "$username"; then
-                log_message "User '$username' created successfully."
-            else
-                log_message "Failed to create user '$username'."
-            fi
-        fi
+echo "Log file permissions set."
 
-        # Add user to their respective groups
-        for group in "${group_array[@]}"; do
-            group=$(echo "$group" | xargs)
-            echo "Adding user '$username' to group: '$group'"  # Debugging output
-            
-            if [[ -n "$group" ]]; then
-                if sudo getent group "$group" &>/dev/null; then
-                    log_message "Group '$group' already exists."
-                else
-                    if sudo groupadd "$group"; then
-                        log_message "Group '$group' created successfully."
-                    else
-                        log_message "Failed to create group '$group'."
-                    fi
-                fi
+# Process the user list file
+while IFS=';' read -r username groups; do
+    username=$(echo "$username" | tr -d '[:space:]')
+    groups=$(echo "$groups" | tr -d '[:space:]')
 
-                if sudo usermod -aG "$group" "$username"; then
-                    log_message "User '$username' added to group '$group'."
-                else
-                    log_message "Failed to add user '$username' to group '$group'."
-                fi
-            else
-                log_message "Skipped invalid or empty group name for user '$username'."
-            fi
-        done
+    echo "Processing user: $username"
 
-        # Ensure user is in their personal group
-        if ! id -nG "$username" | grep -qw "$username"; then
-            if sudo usermod -aG "$username" "$username"; then
-                log_message "User '$username' added to their personal group."
-            else
-                log_message "Failed to add user '$username' to their personal group."
-            fi
-        fi
-
-        # Set permissions for home directory
-        sudo chmod 700 "/home/$username"
-        sudo chown "$username":"$username" "/home/$username"
-        log_message "Home directory permissions set for '$username'."
-
+    # Check if user already exists
+    if id "$username" &>/dev/null; then
+        log_message "User $username already exists."
     else
-        log_message "Skipped invalid line: '$line'"
+        # Create the user with a home directory and a personal group
+        useradd -m -s /bin/bash -U "$username"
+        if [ $? -eq 0 ]; then
+            log_message "User $username created successfully."
+        else
+            log_message "Failed to create user $username."
+            continue
+        fi
+
+        # Generate a random password
+        password=$(openssl rand -base64 12)
+
+        # Set the user's password
+        echo "$username:$password" | chpasswd
+
+        # Store the password securely
+        echo "$username,$password" >> "$PASSWORD_FILE"
+        chmod 600 "$PASSWORD_FILE"
+
+        # Log password storage
+        if [ $? -eq 0 ]; then
+            log_message "Password for $username stored securely."
+        else
+            log_message "Failed to store password for $username."
+        fi
     fi
 
-done < "$input_file"
+    # Add the user to additional groups
+    IFS=',' read -ra ADDR <<< "$groups"
+    for group in "${ADDR[@]}"; do
+        group=$(echo "$group" | tr -d '[:space:]')
+        if [ -z "$group" ]; then
+            continue
+        fi
 
-# Create groups if they don't exist
-for group in "${!unique_groups[@]}"; do
-    group=$(echo "$group" | xargs)
-    echo "Creating group: '$group'"  # Debugging output
-    if [[ -n "$group" ]]; then
-        if sudo getent group "$group" &>/dev/null; then
-            log_message "Group '$group' already exists."
-        else
-            if sudo groupadd "$group"; then
-                log_message "Group '$group' created successfully."
+        # Check if the group exists, if not, create it
+        if ! getent group "$group" &>/dev/null; then
+            groupadd "$group"
+            if [ $? -eq 0 ]; then
+                log_message "Group $group created."
             else
-                log_message "Failed to create group '$group'."
+                log_message "Failed to create group $group."
+                continue
             fi
         fi
-    else
-        log_message "Skipped invalid or empty group name."
-    fi
-done
+
+        usermod -aG "$group" "$username"
+        if [ $? -eq 0 ]; then
+            log_message "User $username added to group $group."
+        else
+            log_message "Failed to add user $username to group $group."
+        fi
+    done
+done < "$USER_LIST_FILE"
+
+log_message "User creation process completed."
+
+echo "Script completed."
+
+exit 0
