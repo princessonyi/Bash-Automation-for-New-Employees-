@@ -109,4 +109,17 @@ while IFS=';' read -r username groups; do
         fi
 
         # Add user to the group
-        usermod -aG "$group" "$username
+        usermod -aG "$group" "$username"
+        if [ $? -eq 0 ]; then
+            log_message "User $username added to group $group."
+        else
+            log_message "Failed to add user $username to group $group."
+        fi
+    done
+
+done < "$USER_LIST_FILE"
+
+log_message "User creation process completed."
+
+echo "Script completed."
+exit 0
