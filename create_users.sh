@@ -32,11 +32,6 @@ chmod 700 /var/secure
 
 echo "Secure directory created."
 
-# Empty the password file if it exists
-> "$PASSWORD_FILE"
-
-echo "Password file emptied."
-
 # Ensure the log file has the right permissions
 touch "$LOGFILE"
 chmod 600 "$LOGFILE"
@@ -62,8 +57,21 @@ while IFS=';' read -r username groups; do
             log_message "Failed to create user $username."
             continue
         fi
+    fi
 
-        # Generate a random password
+    # Ensure the user's personal group exists
+    if ! getent group "$username" &>/dev/null; then
+        groupadd "$username"
+        if [ $? -eq 0 ]; then
+            log_message "Personal group $username created."
+        else
+            log_message "Failed to create personal group $username."
+            continue
+        fi
+    fi
+
+    # Generate a random password if the user was newly created or not previously set
+    if ! grep -q "^$username," "$PASSWORD_FILE"; then
         password=$(openssl rand -base64 12)
 
         # Set the user's password
@@ -81,7 +89,7 @@ while IFS=';' read -r username groups; do
         fi
     fi
 
-    # Add the user to additional groups
+    # Add the user to specified groups
     IFS=',' read -ra ADDR <<< "$groups"
     for group in "${ADDR[@]}"; do
         group=$(echo "$group" | tr -d '[:space:]')
@@ -100,17 +108,5 @@ while IFS=';' read -r username groups; do
             fi
         fi
 
-        usermod -aG "$group" "$username"
-        if [ $? -eq 0 ]; then
-            log_message "User $username added to group $group."
-        else
-            log_message "Failed to add user $username to group $group."
-        fi
-    done
-done < "$USER_LIST_FILE"
-
-log_message "User creation process completed."
-
-echo "Script completed."
-
-exit 0
+        # Add user to the group
+        usermod -aG "$group" "$username
