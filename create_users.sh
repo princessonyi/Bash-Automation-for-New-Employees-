@@ -11,12 +11,14 @@ if [[ ! -f "$input_file" ]]; then
     exit 1
 fi
 
-# Create log file if it doesn't exist
+# Create log file if it doesn't exist and set permissions
 sudo touch "$log_file"
+sudo chmod 600 "$log_file"
 
-# Create password file if it doesn't exist
+# Create password file if it doesn't exist and set permissions
 if [[ ! -f "$password_file" ]]; then
     sudo touch "$password_file"
+    sudo chmod 600 "$password_file"
 fi
 
 # Function to generate a random password
@@ -41,62 +43,116 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # Remove leading and trailing whitespace
     line=$(echo "$line" | xargs)
     
-    # Split the line at the semicolon
-    username=$(echo "$line" | cut -d ';' -f 1 | xargs)
-    group_list=$(echo "$line" | cut -d ';' -f 2 | xargs)
+    # Split the line at the semicolon and check for valid format
+    if [[ "$line" == *";"* ]]; then
+        username=$(echo "$line" | cut -d ';' -f 1 | xargs)
+        group_list=$(echo "$line" | cut -d ';' -f 2 | xargs)
 
-    # Store username
-    usernames+=("$username")
+        # Debugging output to verify parsing
+        echo "Processing user: '$username'"
+        echo "Groups: '$group_list'"
 
-    # Store groups for each user
-    user_groups["$username"]="$group_list"
+        # Store username
+        usernames+=("$username")
 
-    # Split groups by comma and store them in unique_groups
-    IFS=',' read -ra group_array <<< "$group_list"
-    for group in "${group_array[@]}"; do
-        group=$(echo "$group" | xargs)
-        unique_groups["$group"]=1  # Use group name as key to ensure uniqueness
-    done
+        # Store groups for each user
+        user_groups["$username"]="$group_list"
 
-    # Create user and add to groups
-    if sudo getent passwd "$username" &>/dev/null; then
-        log_message "User '$username' already exists."
-    else
-        # Generate random password
-        password=$(generate_password 12)  # Adjust password length as needed
+        # Split groups by comma and store them in unique_groups
+        IFS=',' read -ra group_array <<< "$group_list"
+        for group in "${group_array[@]}"; do
+            group=$(echo "$group" | xargs)
+            echo "Processing group: '$group' for user: '$username'"  # Debugging output
+            unique_groups["$group"]=1
+        done
 
-        # Store password in file
-        echo "$username:$password" | sudo tee -a "$password_file" > /dev/null
-
-        if sudo useradd -m -p "$(openssl passwd -1 "$password")" "$username"; then
-            log_message "User '$username' created successfully."
-
-            # Add user to their respective groups
-            for group in "${group_array[@]}"; do
-                sudo usermod -aG "$group" "$username"
-                log_message "User '$username' added to group '$group'."
-            done
-
-            # Set permissions for home directory
-            sudo chmod 700 "/home/$username"
-            sudo chown "$username":"$username" "/home/$username"
-            log_message "Home directory permissions set for '$username'."
-        else
-            log_message "Failed to create user '$username'."
+        # Ensure the personal group is created
+        if ! sudo getent group "$username" &>/dev/null; then
+            if sudo groupadd "$username"; then
+                log_message "Personal group '$username' created successfully."
+            else
+                log_message "Failed to create personal group '$username'."
+            fi
         fi
+
+        # Create user and add to groups
+        if sudo getent passwd "$username" &>/dev/null; then
+            log_message "User '$username' already exists."
+        else
+            # Generate random password
+            password=$(generate_password 12)
+
+            # Store password in file
+            echo "$username:$password" | sudo tee -a "$password_file" > /dev/null
+
+            if sudo useradd -m -g "$username" -p "$(openssl passwd -1 "$password")" "$username"; then
+                log_message "User '$username' created successfully."
+            else
+                log_message "Failed to create user '$username'."
+            fi
+        fi
+
+        # Add user to their respective groups
+        for group in "${group_array[@]}"; do
+            group=$(echo "$group" | xargs)
+            echo "Adding user '$username' to group: '$group'"  # Debugging output
+            
+            if [[ -n "$group" ]]; then
+                if sudo getent group "$group" &>/dev/null; then
+                    log_message "Group '$group' already exists."
+                else
+                    if sudo groupadd "$group"; then
+                        log_message "Group '$group' created successfully."
+                    else
+                        log_message "Failed to create group '$group'."
+                    fi
+                fi
+
+                if sudo usermod -aG "$group" "$username"; then
+                    log_message "User '$username' added to group '$group'."
+                else
+                    log_message "Failed to add user '$username' to group '$group'."
+                fi
+            else
+                log_message "Skipped invalid or empty group name for user '$username'."
+            fi
+        done
+
+        # Ensure user is in their personal group
+        if ! id -nG "$username" | grep -qw "$username"; then
+            if sudo usermod -aG "$username" "$username"; then
+                log_message "User '$username' added to their personal group."
+            else
+                log_message "Failed to add user '$username' to their personal group."
+            fi
+        fi
+
+        # Set permissions for home directory
+        sudo chmod 700 "/home/$username"
+        sudo chown "$username":"$username" "/home/$username"
+        log_message "Home directory permissions set for '$username'."
+
+    else
+        log_message "Skipped invalid line: '$line'"
     fi
 
 done < "$input_file"
 
 # Create groups if they don't exist
 for group in "${!unique_groups[@]}"; do
-    if sudo getent group "$group" &>/dev/null; then
-        log_message "Group '$group' already exists."
-    else
-        if sudo groupadd "$group"; then
-            log_message "Group '$group' created successfully."
+    group=$(echo "$group" | xargs)
+    echo "Creating group: '$group'"  # Debugging output
+    if [[ -n "$group" ]]; then
+        if sudo getent group "$group" &>/dev/null; then
+            log_message "Group '$group' already exists."
         else
-            log_message "Failed to create group '$group'."
+            if sudo groupadd "$group"; then
+                log_message "Group '$group' created successfully."
+            else
+                log_message "Failed to create group '$group'."
+            fi
         fi
+    else
+        log_message "Skipped invalid or empty group name."
     fi
 done
